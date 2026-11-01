@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+history.json
+homeflix.log
+thumbs/
+videos/
+dist/
+installer/stage/
+installer/embed.zip
+installer/ffmpeg_src/

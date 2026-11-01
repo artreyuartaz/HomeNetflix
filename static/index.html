@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Netflix</title>
+  <script src="/static/tailwind.js"></script>
+  <style>
+    body { background:#141414; }
+    .card { transition: transform .2s ease, box-shadow .2s ease; }
+    .card:hover { transform: scale(1.05); box-shadow: 0 10px 30px rgba(0,0,0,.7); z-index: 10; }
+    .card .overlay { opacity: 0; transition: opacity .2s; }
+    .card:hover .overlay { opacity: 1; }
+  </style>
+</head>
+<body class="text-white min-h-screen">
+  <header class="sticky top-0 z-20 bg-gradient-to-b from-black to-black/70 backdrop-blur px-6 py-4 flex flex-wrap items-center gap-4">
+    <h1 class="text-red-600 text-3xl font-extrabold tracking-wider">HOME FLIX</h1>
+    <input id="search" type="text" placeholder="Search..." class="bg-zinc-800 rounded px-3 py-2 text-sm w-48 md:w-72 focus:outline-none focus:ring-2 focus:ring-red-600">
+    <select id="parentSel" title="Parent folder" class="bg-zinc-800 rounded px-3 py-2 text-sm max-w-[12rem]"></select>
+    <select id="childSel" title="Subfolder" class="bg-zinc-800 rounded px-3 py-2 text-sm max-w-[12rem] disabled:opacity-40"></select>
+    <select id="filter" class="bg-zinc-800 rounded px-3 py-2 text-sm">
+      <option value="all">All</option>
+      <option value="unwatched">Unwatched</option>
+      <option value="watched">Watched</option>
+    </select>
+    <button id="refresh" class="ml-auto bg-zinc-800 hover:bg-zinc-700 rounded px-3 py-2 text-sm">Rescan</button>
+    <button id="quit" title="Stop the Home Flix server" class="bg-zinc-800 hover:bg-red-700 rounded px-3 py-2 text-sm">Quit</button>
+  </header>
+
+  <main id="main" class="px-6 pb-16"></main>
+
+  <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-zinc-800 border border-zinc-600 px-4 py-2 rounded shadow-lg hidden"></div>
+
+  <script>
+    const GRADIENTS = [
+      "from-red-900 to-zinc-900", "from-indigo-900 to-zinc-900", "from-emerald-900 to-zinc-900",
+      "from-amber-800 to-zinc-900", "from-fuchsia-900 to-zinc-900", "from-sky-900 to-zinc-900",
+    ];
+    let videos = [];
+    let thumbsOn = false;
+
+    const $ = (s) => document.querySelector(s);
+    const esc = (s) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const hash = (s) => [...s].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+
+    function toast(msg, ms = 3000) {
+      const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden");
+      clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), ms);
+    }
+
+    async function load() {
+      const res = await fetch("/api/library");
+      const data = await res.json();
+      videos = data.videos;
+      thumbsOn = data.thumbnails;
+      fillParents();
+      render();
+    }
+
+    const opts = (first, items, sel) =>
+      `<option value="">${first}</option>` +
+      items.map(i => `<option value="${esc(i)}"${i === sel ? " selected" : ""}>${esc(i)}</option>`).join("");
+    const uniq = (arr) => [...new Set(arr)].sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+
+    function fillParents() {
+      const sel = $("#parentSel").value;
+      const parents = uniq(videos.map(v => v.parent));
+      $("#parentSel").innerHTML = opts("All folders", parents, sel);
+      if (!parents.includes(sel)) $("#parentSel").value = "";
+      fillChildren();
+    }
+
+    function fillChildren() {
+      const p = $("#parentSel").value;
+      const sel = $("#childSel").value;
+      const kids = uniq(videos.filter(v => (!p || v.parent === p) && v.child).map(v => v.child));
+      $("#childSel").innerHTML = opts("All subfolders", kids, sel);
+      if (!kids.includes(sel)) $("#childSel").value = "";
+      $("#childSel").disabled = !p || !kids.length;
+    }
+
+    function render() {
+      const q = $("#search").value.trim().toLowerCase();
+      const f = $("#filter").value;
+      const p = $("#parentSel").value, c = $("#childSel").value;
+      const shown = videos.filter(v =>
+        (!p || v.parent === p) && (!c || v.child === c) &&
+        (!q || v.title.toLowerCase().includes(q) || v.group.toLowerCase().includes(q)) &&
+        (f === "all" || (f === "watched") === v.watched));
+
+      const groups = {};
+      shown.forEach(v => (groups[v.group] ||= []).push(v));
+
+      const main = $("#main");
+      if (!shown.length) {
+        main.innerHTML = `<p class="text-zinc-400 mt-16 text-center">No videos found. Put .mp4 / .mkv / .avi files in your videos folder and click Rescan.</p>`;
+        return;
+      }
+      main.innerHTML = Object.entries(groups).map(([name, list]) => `
+        <section class="mt-8">
+          <h2 class="text-xl font-semibold mb-3">${esc(name)}
+            <span class="text-sm text-zinc-500 font-normal">${list.filter(v => v.watched).length}/${list.length} watched</span></h2>
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+            ${list.map(cardHtml).join("")}
+          </div>
+        </section>`).join("");
+    }
+
+    function cardHtml(v) {
+      const g = GRADIENTS[hash(v.id) % GRADIENTS.length];
+      const date = v.date_watched ? new Date(v.date_watched).toLocaleString() : "";
+      return `
+      <div class="card relative rounded overflow-hidden cursor-pointer bg-zinc-900" data-id="${esc(v.id)}">
+        <div class="relative aspect-video bg-gradient-to-br ${g} flex items-center justify-center">
+          <span class="text-5xl font-black opacity-40">${esc(v.title.charAt(0).toUpperCase())}</span>
+          ${thumbsOn ? `<img src="/api/thumb?id=${encodeURIComponent(v.id)}" loading="lazy" alt=""
+               class="absolute inset-0 w-full h-full object-cover" onerror="this.remove()">` : ""}
+        </div>
+        ${v.watched ? `<span class="absolute top-2 right-2 bg-green-600 text-xs font-bold px-2 py-1 rounded shadow">✓ Watched</span>` : ""}
+        <div class="overlay absolute inset-0 bg-black/60 flex items-center justify-center">
+          <div class="w-14 h-14 rounded-full bg-white/90 text-black flex items-center justify-center text-2xl pl-1">▶</div>
+        </div>
+        <div class="p-2">
+          <div class="text-sm font-medium truncate" title="${esc(v.title)}">${esc(v.title)}</div>
+          <div class="text-xs text-zinc-500 flex justify-between gap-2">
+            <span class="truncate">${date ? esc(date) : v.extension.toUpperCase() + " · " + v.size_mb + " MB"}</span>
+            ${v.watched ? `<button class="unmark text-zinc-400 hover:text-red-500 shrink-0" title="Mark as unwatched">✕</button>` : ""}
+          </div>
+        </div>
+      </div>`;
+    }
+
+    async function play(id) {
+      const v = videos.find(x => x.id === id);
+      // Update UI immediately
+      v.watched = true; v.date_watched = new Date().toISOString(); render();
+      try {
+        const res = await fetch("/api/play", {
+          method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id}),
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+        toast(`Launching VLC: ${v.title}`);
+      } catch (e) {
+        toast("Error: " + e.message, 6000);
+      }
+      load();
+    }
+
+    async function unmark(id) {
+      await fetch("/api/watched", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id, watched: false}),
+      });
+      load();
+    }
+
+    $("#main").addEventListener("click", (e) => {
+      const card = e.target.closest(".card");
+      if (!card) return;
+      if (e.target.closest(".unmark")) { e.stopPropagation(); unmark(card.dataset.id); return; }
+      play(card.dataset.id);
+    });
+    $("#search").addEventListener("input", render);
+    $("#filter").addEventListener("change", render);
+    $("#parentSel").addEventListener("change", () => { $("#childSel").value = ""; fillChildren(); render(); });
+    $("#childSel").addEventListener("change", render);
+    $("#refresh").addEventListener("click", load);
+    $("#quit").addEventListener("click", async () => {
+      if (!confirm("Stop Home Flix? Start it again from the shortcut.")) return;
+      try { await fetch("/api/shutdown", {method: "POST"}); } catch (e) {}
+      document.body.innerHTML = '<p class="text-center mt-24 text-zinc-400">Home Flix has stopped. You can close this tab.</p>';
+    });
+    load();
+  </script>
+</body>
+</html>
