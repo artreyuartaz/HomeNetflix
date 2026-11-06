@@ -43,7 +43,13 @@ VLC_FULLSCREEN = os.getenv("VLC_FULLSCREEN", "true").lower() not in ("0", "false
 # Open the browser automatically when the app starts
 OPEN_BROWSER = os.getenv("OPEN_BROWSER", "true").lower() not in ("0", "false", "no")
 
-VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi"}
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mpg", ".mpeg"}
+
+# Remembered dropdown selections (folder, subfolder, filter, play mode)
+PREFS_FILE = _resolve(os.getenv("PREFS_FILE", "prefs.json"))
+
+# Browser playback: a video counts as watched once this percentage of it has actually been played.
+WATCH_PERCENT = float(os.getenv("WATCH_PERCENT", "90"))
 
 # 127.0.0.1 = only this PC. Use 0.0.0.0 to open it to your home network
 # (note: VLC would still launch on the PC running the server).

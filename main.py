@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -9,12 +10,14 @@ import threading
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 import config
 
@@ -68,6 +71,8 @@ def scan_videos() -> list[dict]:
             "watched": bool(entry.get("watched")),
             "date_watched": entry.get("date_watched"),
             "play_count": entry.get("play_count", 0),
+            "position": entry.get("position", 0),  # resume point (seconds) for browser playback
+            "duration": entry.get("duration", 0),
         })
     return items
 
@@ -123,8 +128,11 @@ _thumb_slots = threading.BoundedSemaphore(2)  # at most 2 ffmpeg processes at on
 
 
 def find_ffmpeg() -> str | None:
-    if not config.THUMBNAILS:
-        return None
+    """ffmpeg for thumbnails (honours THUMBNAILS=false)."""
+    return locate_ffmpeg() if config.THUMBNAILS else None
+
+
+def locate_ffmpeg() -> str | None:
     if config.FFMPEG_PATH and Path(config.FFMPEG_PATH).is_file():
         return config.FFMPEG_PATH
     bundled = config.PROJECT_ROOT / "ffmpeg" / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
@@ -177,10 +185,105 @@ def get_thumbnail(video: Path, video_id: str) -> Path | None:
     return None
 
 
+# ---------- browser playback (direct play or on-the-fly ffmpeg conversion) ----------
+
+_probe_cache: dict = {}
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
+
+def probe_video(video: Path) -> dict:
+    """Read duration and codecs by parsing `ffmpeg -i` output (ffprobe is not bundled)."""
+    st = video.stat()
+    key = (str(video), st.st_size, st.st_mtime_ns)
+    if key in _probe_cache:
+        return _probe_cache[key]
+    info = {"duration": 0.0, "vcodec": None, "vok": False, "acodec": None}
+    ffmpeg = locate_ffmpeg()
+    if ffmpeg:
+        try:
+            out = subprocess.run([ffmpeg, "-hide_banner", "-nostdin", "-i", str(video)],
+                                 stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                                 creationflags=_NO_WINDOW).stderr.decode("utf-8", "replace")
+        except (subprocess.TimeoutExpired, OSError):
+            out = ""
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
+        if m:
+            info["duration"] = int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3])
+        for line in out.splitlines():
+            if "Video:" in line and "attached pic" not in line and not info["vcodec"]:
+                info["vcodec"] = re.search(r"Video:\s*(\w+)", line)[1].lower()
+                # 8-bit 4:2:0 H.264 is what every browser can decode
+                info["vok"] = info["vcodec"] == "h264" and bool(re.search(r"yuv420p(?!\w)", line))
+            elif "Audio:" in line and not info["acodec"]:
+                info["acodec"] = re.search(r"Audio:\s*(\w+)", line)[1].lower()
+    _probe_cache[key] = info
+    return info
+
+
+def can_direct_play(video: Path, info: dict) -> bool:
+    return (video.suffix.lower() in (".mp4", ".m4v") and info["vok"]
+            and info["acodec"] in (None, "aac", "mp3"))
+
+
+def add_range(ranges: list, a: float, b: float) -> list:
+    """Merge [a, b] into a sorted list of non-overlapping played ranges."""
+    merged = []
+    for x, y in sorted(ranges + [[a, b]]):
+        if merged and x <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], y)
+        else:
+            merged.append([x, y])
+    return merged
+
+
+def covered_seconds(ranges: list, limit: float) -> float:
+    return sum(max(0.0, min(b, limit) - a) for a, b in ranges if a < limit)
+
+
+def transcode_cmd(ffmpeg: str, video: Path, info: dict, start: float) -> list[str]:
+    cmd = [ffmpeg, "-nostdin", "-v", "error"]
+    if start > 0:
+        cmd += ["-ss", f"{start:.3f}"]
+    cmd += ["-i", str(video), "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
+    # Only convert what the browser cannot play: H.264/AAC are copied, which is very fast.
+    if info["vok"]:
+        cmd += ["-c:v", "copy"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"]
+    if info["acodec"] == "aac":
+        cmd += ["-c:a", "copy"]
+    else:
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    cmd += ["-avoid_negative_ts", "make_zero", "-f", "mp4",
+            "-movflags", "frag_keyframe+empty_moov+default_base_moof", "pipe:1"]
+    return cmd
+
+
+# ---------- remembered dropdown selections ----------
+
+PREF_KEYS = {"parent", "child", "filter", "mode"}
+
+
+def load_prefs() -> dict:
+    try:
+        with open(config.PREFS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {k: v for k, v in data.items() if k in PREF_KEYS and isinstance(v, str)}
+    except (FileNotFoundError, json.JSONDecodeError, AttributeError):
+        return {}
+
+
 # ---------- API ----------
 
 class VideoRef(BaseModel):
     id: str
+
+
+class Progress(BaseModel):
+    id: str
+    position: float
+    duration: float = 0
+    range_start: float | None = None  # continuously played stretch since the last report
 
 
 class WatchedFlag(BaseModel):
@@ -191,7 +294,114 @@ class WatchedFlag(BaseModel):
 @app.get("/api/library")
 def library():
     return {"videos": scan_videos(), "videos_dir": str(config.VIDEOS_DIR),
-            "thumbnails": find_ffmpeg() is not None}
+            "thumbnails": find_ffmpeg() is not None, "prefs": load_prefs()}
+
+
+@app.post("/api/prefs")
+def save_prefs(prefs: dict):
+    clean = {k: v for k, v in prefs.items() if k in PREF_KEYS and isinstance(v, str)}
+    with _lock:
+        merged = {**load_prefs(), **clean}
+        tmp = config.PREFS_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, config.PREFS_FILE)
+    return {"ok": True}
+
+
+@app.get("/api/playinfo")
+def playinfo(id: str, start: float | None = None):
+    """How the browser should play this video, and where to resume."""
+    video = resolve_video(id)
+    info = probe_video(video)
+    direct = can_direct_play(video, info)
+    if not direct and not locate_ffmpeg():
+        raise HTTPException(500, f"ffmpeg is needed to play .{video.suffix.lstrip('.')} files in the browser. "
+                                 "Install it or set FFMPEG_PATH in .env, or play in VLC.")
+    entry = load_history().get(id, {})
+    quoted = quote(id)
+    return {"mode": "direct" if direct else "transcode",
+            "url": f"/api/file?id={quoted}" if direct else f"/api/transcode?id={quoted}",
+            "duration": info["duration"] or entry.get("duration", 0),
+            "position": entry.get("position", 0),
+            "title": video.stem}
+
+
+@app.get("/api/file")
+def raw_file(id: str):
+    # FileResponse handles HTTP Range requests, so seeking works in the browser.
+    return FileResponse(resolve_video(id), media_type="video/mp4")
+
+
+@app.get("/api/transcode")
+async def transcode(id: str, start: float = 0):
+    """Stream the video as fragmented MP4, converted by ffmpeg while it is being watched."""
+    video = resolve_video(id)
+    ffmpeg = locate_ffmpeg()
+    if not ffmpeg:
+        raise HTTPException(500, "ffmpeg not found")
+    info = probe_video(video)
+    proc = subprocess.Popen(transcode_cmd(ffmpeg, video, info, max(0.0, start)),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
+
+    async def body():
+        try:
+            while True:
+                chunk = await run_in_threadpool(proc.stdout.read1, 65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:  # browser closed/seeked: stop converting
+            if proc.poll() is None:
+                proc.kill()
+            proc.stdout.close()
+            proc.wait()
+
+    return StreamingResponse(body(), media_type="video/mp4", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/progress")
+def progress(p: Progress):
+    """Browser playback progress: saves the resume point, and marks the video watched once
+    it has actually been played for WATCH_PERCENT of its length."""
+    video = resolve_video(p.id)
+    with _lock:
+        history = load_history()
+        entry = history.setdefault(p.id, {"title": video.stem})
+        duration = p.duration or entry.get("duration", 0)
+        position = max(0.0, min(p.position, duration)) if duration else max(0.0, p.position)
+        ranges = entry.get("played", [])
+        if p.range_start is not None and 0 <= p.range_start < position:
+            ranges = add_range(ranges, p.range_start, position)
+        completed = bool(duration > 0 and covered_seconds(ranges, duration) >= duration * config.WATCH_PERCENT / 100)
+        if completed:
+            entry.update({
+                "title": video.stem, "watched": True,
+                "date_watched": datetime.now().isoformat(timespec="seconds"),
+                "play_count": entry.get("play_count", 0) + 1,
+                "size_mb": round(video.stat().st_size / 1_048_576, 1),
+            })
+            for k in ("position", "duration", "played"):
+                entry.pop(k, None)
+        else:
+            entry.update({"position": round(position, 1), "duration": round(duration, 1), "played": ranges})
+        save_history(history)
+    return {"ok": True, "completed": completed, "play_count": entry.get("play_count", 0),
+            "date_watched": entry.get("date_watched")}
+
+
+@app.post("/api/clear-progress")
+def clear_progress(ref: VideoRef):
+    resolve_video(ref.id)
+    with _lock:
+        history = load_history()
+        entry = history.get(ref.id)
+        if entry:
+            for k in ("position", "duration", "played"):
+                entry.pop(k, None)
+            save_history(history)
+    return {"ok": True}
 
 
 @app.get("/api/thumb")
@@ -233,6 +443,8 @@ def set_watched(flag: WatchedFlag):
             entry["date_watched"] = datetime.now().isoformat(timespec="seconds")
         else:
             entry["date_watched"] = None
+            for k in ("position", "duration", "played"):  # also forget any resume point
+                entry.pop(k, None)
         save_history(history)
     return {"ok": True}
 

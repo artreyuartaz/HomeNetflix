@@ -1,6 +1,6 @@
 ; Inno Setup script. Build with installer\build_installer.ps1
 #define AppName "Home Flix"
-#define AppVersion "1.0"
+#define AppVersion "1.1"
 
 [Setup]
 AppId={{6B1F5C2E-8A47-4D0B-9E53-2C7A1D4F90A1}
@@ -19,6 +19,12 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#AppName}
+; Same AppId as every earlier version, so running this installer UPDATES an existing install
+; in place (same folder, settings and watch history kept). Don't change AppId.
+UsePreviousAppDir=yes
+DisableDirPage=auto
+UsePreviousTasks=yes
+CloseApplications=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
@@ -37,7 +43,11 @@ Name: "{userstartup}\{#AppName}"; Filename: "{app}\python\pythonw.exe"; Paramete
 [Run]
 Filename: "{app}\python\pythonw.exe"; Parameters: "main.py"; WorkingDir: "{app}"; Description: "Start {#AppName} now"; Flags: postinstall nowait skipifsilent
 
-; .env and history.json are user data: they are not listed in [Files], so upgrades and uninstalls keep them.
+; Remove stale compiled files from the old version before copying the new ones.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\__pycache__"
+
+; .env, history.json and prefs.json are user data: they are not listed in [Files], so upgrades and uninstalls keep them.
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\__pycache__"
@@ -62,6 +72,19 @@ function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   // Upgrade: keep the existing settings
   Result := (PageID = VideoPage.ID) and FileExists(WizardDirValue + '\.env');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  // Upgrade: stop a running Home Flix (only the copy in the install folder) so its files can be replaced.
+  Exec('powershell.exe',
+    '-NoProfile -ExecutionPolicy Bypass -Command "Get-Process pythonw,ffmpeg -ErrorAction SilentlyContinue | ' +
+    'Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '\*'' } | Stop-Process -Force"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(800);
+  Result := '';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

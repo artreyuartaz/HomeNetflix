@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 history.json
+prefs.json
 homeflix.log
 thumbs/
 videos/

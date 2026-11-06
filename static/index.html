@@ -24,13 +24,43 @@
       <option value="unwatched">Unwatched</option>
       <option value="watched">Watched</option>
     </select>
+    <select id="modeSel" title="Where videos play when you click them" class="bg-zinc-800 rounded px-3 py-2 text-sm">
+      <option value="vlc">Play in VLC</option>
+      <option value="browser">Play in browser</option>
+    </select>
     <button id="refresh" class="ml-auto bg-zinc-800 hover:bg-zinc-700 rounded px-3 py-2 text-sm">Rescan</button>
     <button id="quit" title="Stop the Home Flix server" class="bg-zinc-800 hover:bg-red-700 rounded px-3 py-2 text-sm">Quit</button>
   </header>
 
   <main id="main" class="px-6 pb-16"></main>
 
-  <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-zinc-800 border border-zinc-600 px-4 py-2 rounded shadow-lg hidden"></div>
+  <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-zinc-800 border border-zinc-600 px-4 py-2 rounded shadow-lg hidden z-[60]"></div>
+
+  <!-- In-browser player -->
+  <div id="player" class="fixed inset-0 z-50 bg-black hidden select-none">
+    <video id="vid" class="w-full h-full" playsinline></video>
+    <div id="pbuf" class="absolute inset-0 flex items-center justify-center text-zinc-300 pointer-events-none hidden">Loading…</div>
+    <div id="pui" class="absolute inset-0 flex flex-col justify-between transition-opacity">
+      <div class="bg-gradient-to-b from-black/80 to-transparent px-6 py-4 flex items-center gap-4">
+        <button id="pclose" class="text-2xl hover:text-red-500" title="Close (Esc)">✕</button>
+        <div id="ptitle" class="text-lg font-semibold truncate"></div>
+      </div>
+      <div id="pclick" class="flex-1"></div>
+      <div class="bg-gradient-to-t from-black/90 to-transparent px-6 pb-5 pt-10">
+        <input id="pseek" type="range" min="0" max="1000" value="0" class="w-full accent-red-600">
+        <div class="flex items-center gap-4 mt-1 text-sm">
+          <button id="pplay" class="text-2xl w-8" title="Play/Pause (Space)">▶</button>
+          <button id="pback" class="hover:text-red-500" title="Back 10s (←)">⏪ 10</button>
+          <button id="pfwd" class="hover:text-red-500" title="Forward 10s (→)">10 ⏩</button>
+          <span id="ptime" class="tabular-nums text-zinc-300"></span>
+          <span id="pnote" class="text-xs text-zinc-500"></span>
+          <button id="prestart" class="ml-auto hover:text-red-500">⟲ Start over</button>
+          <input id="pvol" type="range" min="0" max="1" step="0.05" value="1" class="w-24 accent-red-600" title="Volume">
+          <button id="pfull" class="hover:text-red-500" title="Exit fullscreen (Esc)">⛶</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script>
     const GRADIENTS = [
@@ -49,13 +79,34 @@
       clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), ms);
     }
 
+    let prefs = null;  // remembered dropdown choices (stored on the server in prefs.json)
+
     async function load() {
       const res = await fetch("/api/library");
       const data = await res.json();
       videos = data.videos;
       thumbsOn = data.thumbnails;
+      const first = prefs === null;
+      if (first) prefs = data.prefs || {};
       fillParents();
+      if (first) applyPrefs();
       render();
+    }
+
+    function applyPrefs() {
+      const setIf = (el, val) => { if (val && [...el.options].some(o => o.value === val)) el.value = val; };
+      setIf($("#parentSel"), prefs.parent);
+      fillChildren();
+      setIf($("#childSel"), prefs.child);
+      setIf($("#filter"), prefs.filter);
+      setIf($("#modeSel"), prefs.mode);
+    }
+
+    function savePrefs() {
+      prefs = {parent: $("#parentSel").value, child: $("#childSel").value,
+               filter: $("#filter").value, mode: $("#modeSel").value};
+      fetch("/api/prefs", {method: "POST", headers: {"Content-Type": "application/json"},
+                           body: JSON.stringify(prefs)}).catch(() => {});
     }
 
     const opts = (first, items, sel) =>
@@ -117,21 +168,30 @@
           ${thumbsOn ? `<img src="/api/thumb?id=${encodeURIComponent(v.id)}" loading="lazy" alt=""
                class="absolute inset-0 w-full h-full object-cover" onerror="this.remove()">` : ""}
         </div>
-        ${v.watched ? `<span class="absolute top-2 right-2 bg-green-600 text-xs font-bold px-2 py-1 rounded shadow">✓ Watched</span>` : ""}
+        ${v.watched ? `<span class="absolute top-2 right-2 bg-green-600 text-xs font-bold px-2 py-1 rounded shadow">✓ ${v.play_count > 1 ? v.play_count + " watched" : "Watched"}</span>` : ""}
+        ${resumable(v) ? `<div class="absolute left-0 right-0 bottom-[2.9rem] h-1 bg-black/60"><div class="h-full bg-red-600" style="width:${Math.min(100, v.position / v.duration * 100)}%"></div></div>` : ""}
         <div class="overlay absolute inset-0 bg-black/60 flex items-center justify-center">
           <div class="w-14 h-14 rounded-full bg-white/90 text-black flex items-center justify-center text-2xl pl-1">▶</div>
         </div>
         <div class="p-2">
           <div class="text-sm font-medium truncate" title="${esc(v.title)}">${esc(v.title)}</div>
           <div class="text-xs text-zinc-500 flex justify-between gap-2">
-            <span class="truncate">${date ? esc(date) : v.extension.toUpperCase() + " · " + v.size_mb + " MB"}</span>
-            ${v.watched ? `<button class="unmark text-zinc-400 hover:text-red-500 shrink-0" title="Mark as unwatched">✕</button>` : ""}
+            <span class="truncate">${resumable(v) ? "Continue at " + fmt(v.position) : date ? esc(date) : v.extension.toUpperCase() + " · " + v.size_mb + " MB"}</span>
+            ${v.watched || resumable(v) ? `<button class="unmark text-zinc-400 hover:text-red-500 shrink-0" title="${v.watched ? "Mark as unwatched" : "Forget resume point"}">✕</button>` : ""}
           </div>
         </div>
       </div>`;
     }
 
+    const resumable = (v) => v.position > 5 && v.duration > 0;
+    const fmt = (s) => {
+      s = Math.max(0, Math.floor(s || 0));
+      const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+      return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+    };
+
     async function play(id) {
+      if ($("#modeSel").value === "browser") return openPlayer(id);
       const v = videos.find(x => x.id === id);
       // Update UI immediately
       v.watched = true; v.date_watched = new Date().toISOString(); render();
@@ -161,10 +221,173 @@
       play(card.dataset.id);
     });
     $("#search").addEventListener("input", render);
-    $("#filter").addEventListener("change", render);
-    $("#parentSel").addEventListener("change", () => { $("#childSel").value = ""; fillChildren(); render(); });
-    $("#childSel").addEventListener("change", render);
+    $("#filter").addEventListener("change", () => { render(); savePrefs(); });
+    $("#parentSel").addEventListener("change", () => { $("#childSel").value = ""; fillChildren(); render(); savePrefs(); });
+    $("#childSel").addEventListener("change", () => { render(); savePrefs(); });
+    $("#modeSel").addEventListener("change", savePrefs);
     $("#refresh").addEventListener("click", load);
+    // ---------- in-browser player ----------
+    // "direct" videos are served as-is; others are converted by ffmpeg while streaming. A converted
+    // stream can't be seeked natively, so seeking restarts it at the new time (P.offset).
+    const P = {open: false};
+    const vid = $("#vid");
+    const curPos = () => P.offset + (vid.currentTime || 0);
+    const total = () => P.duration || (isFinite(vid.duration) ? vid.duration : 0);
+
+    async function openPlayer(id) {
+      let info;
+      try {
+        const r = await fetch("/api/playinfo?id=" + encodeURIComponent(id));
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        info = await r.json();
+      } catch (e) { toast("Error: " + e.message, 6000); return; }
+      Object.assign(P, {open: true, id, mode: info.mode, url: info.url, duration: info.duration,
+                        offset: 0, segStart: null, completed: false, ready: false, pending: 0});
+      $("#ptitle").textContent = info.title;
+      $("#pnote").textContent = info.mode === "transcode" ? "Converting on the fly" : "";
+      $("#player").classList.remove("hidden");
+      document.body.style.overflow = "hidden";
+      let start = info.position > 5 ? info.position : 0;
+      if (info.duration && info.duration - start < 10) start = 0;
+      if (start) toast("Continuing from " + fmt(start));
+      startAt(start, true);
+      enterFull();
+      showUi();
+    }
+
+    function startAt(t, first) {
+      P.ready = false; P.segStart = null;
+      $("#pbuf").classList.remove("hidden");
+      if (P.mode === "transcode") {
+        P.offset = t;
+        vid.src = P.url + "&start=" + t.toFixed(1);
+      } else {
+        P.offset = 0; P.pending = t;
+        if (first) vid.src = P.url; else vid.currentTime = t;
+      }
+      vid.play().catch(() => {});
+    }
+
+    function seekTo(t) {
+      if (!P.open) return;
+      const d = total();
+      t = Math.max(0, d ? Math.min(t, d - 1) : t);
+      report(false);
+      if (P.mode === "transcode") startAt(t, false);
+      else { P.ready = false; P.segStart = null; vid.currentTime = t; }
+    }
+
+    function send(body, beacon) {
+      const json = JSON.stringify(body);
+      if (beacon && navigator.sendBeacon) {
+        navigator.sendBeacon("/api/progress", new Blob([json], {type: "application/json"}));
+        return;
+      }
+      fetch("/api/progress", {method: "POST", headers: {"Content-Type": "application/json"}, body: json})
+        .then(r => r.json()).then(res => {
+          const v = videos.find(x => x.id === body.id);
+          if (res.completed && v) {
+            Object.assign(v, {watched: true, play_count: res.play_count, date_watched: res.date_watched,
+                              position: 0, duration: 0});
+            if (P.id === body.id) { P.completed = true; toast("Marked as watched"); }
+            render();
+          } else if (v) { v.position = body.position; v.duration = body.duration; }
+        }).catch(() => {});
+    }
+
+    // Report playback progress. range_start..position is the stretch played without seeking.
+    function report(keepPlaying, beacon) {
+      if (!P.open || P.completed || !P.ready) return;
+      const position = curPos();
+      send({id: P.id, position, duration: total(), range_start: P.segStart}, beacon);
+      P.segStart = keepPlaying && !vid.paused ? position : null;
+    }
+
+    function closePlayer() {
+      if (!P.open) return;
+      report(false);
+      P.open = false; P.fs = false;
+      vid.pause(); vid.removeAttribute("src"); vid.load();
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      $("#player").classList.add("hidden");
+      document.body.style.overflow = "";
+      setTimeout(load, 400);  // refresh cards (resume bars, watched badges) after the save lands
+    }
+
+    function updateUi() {
+      const d = total(), c = curPos();
+      if (!$("#pseek").matches(":active")) $("#pseek").value = d ? c / d * 1000 : 0;
+      $("#ptime").textContent = fmt(c) + " / " + (d ? fmt(d) : "--:--");
+      $("#pplay").textContent = vid.paused ? "▶" : "⏸";
+    }
+
+    let uiTimer;
+    function showUi() {
+      $("#pui").style.opacity = 1; $("#player").style.cursor = "";
+      clearTimeout(uiTimer);
+      uiTimer = setTimeout(() => {
+        if (!vid.paused) { $("#pui").style.opacity = 0; $("#player").style.cursor = "none"; }
+      }, 3000);
+    }
+
+    const togglePlay = () => (vid.paused ? vid.play() : vid.pause());
+    // The player runs in true fullscreen (no browser bar). Leaving fullscreen (Esc or the button) closes it.
+    const enterFull = () => { if (!document.fullscreenElement) $("#player").requestFullscreen().catch(() => {}); };
+    const toggleFull = () => document.fullscreenElement ? closePlayer() : enterFull();
+    document.addEventListener("fullscreenchange", () => {
+      if (document.fullscreenElement) P.fs = true;
+      else if (P.open && P.fs) closePlayer();
+    });
+
+    vid.addEventListener("loadedmetadata", () => {
+      if (P.mode === "direct") {
+        if (!P.duration && isFinite(vid.duration)) P.duration = vid.duration;
+        if (P.pending > 0) { vid.currentTime = P.pending; P.pending = 0; return; }
+      }
+      P.ready = true;
+    });
+    vid.addEventListener("seeked", () => { P.ready = true; if (!vid.paused) P.segStart = curPos(); });
+    vid.addEventListener("playing", () => { $("#pbuf").classList.add("hidden"); if (P.segStart == null && P.ready) P.segStart = curPos(); });
+    vid.addEventListener("waiting", () => $("#pbuf").classList.remove("hidden"));
+    vid.addEventListener("pause", () => { report(false); updateUi(); showUi(); });
+    vid.addEventListener("play", updateUi);
+    vid.addEventListener("timeupdate", updateUi);
+    vid.addEventListener("ended", () => { report(false); setTimeout(closePlayer, 800); });  // back to the main page
+    vid.addEventListener("error", () => {
+      if (P.open && vid.getAttribute("src")) toast("Could not play this video in the browser. Try VLC.", 7000);
+    });
+    setInterval(() => { if (P.open && !vid.paused) report(true); }, 5000);
+    window.addEventListener("pagehide", () => report(false, true));
+
+    $("#pclose").addEventListener("click", closePlayer);
+    $("#pclick").addEventListener("click", togglePlay);
+    $("#pclick").addEventListener("dblclick", enterFull);
+    $("#pplay").addEventListener("click", togglePlay);
+    $("#pback").addEventListener("click", () => seekTo(curPos() - 10));
+    $("#pfwd").addEventListener("click", () => seekTo(curPos() + 10));
+    $("#pfull").addEventListener("click", toggleFull);
+    $("#pvol").addEventListener("input", (e) => { vid.volume = +e.target.value; });
+    $("#pseek").addEventListener("input", (e) => {
+      $("#ptime").textContent = fmt(e.target.value / 1000 * total()) + " / " + fmt(total());
+    });
+    $("#pseek").addEventListener("change", (e) => seekTo(e.target.value / 1000 * total()));
+    $("#prestart").addEventListener("click", async () => {
+      await fetch("/api/clear-progress", {method: "POST", headers: {"Content-Type": "application/json"},
+                                          body: JSON.stringify({id: P.id})}).catch(() => {});
+      seekTo(0);
+    });
+    $("#player").addEventListener("mousemove", showUi);
+    document.addEventListener("keydown", (e) => {
+      if (!P.open) return;
+      showUi();
+      if (e.key === "Escape") closePlayer();
+      else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); seekTo(curPos() - 10); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); seekTo(curPos() + 10); }
+      else if (e.key === "f" || e.key === "F") enterFull();
+      else if (e.key === "m" || e.key === "M") vid.muted = !vid.muted;
+    });
+
     $("#quit").addEventListener("click", async () => {
       if (!confirm("Stop Home Flix? Start it again from the shortcut.")) return;
       try { await fetch("/api/shutdown", {method: "POST"}); } catch (e) {}

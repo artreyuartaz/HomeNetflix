@@ -1,12 +1,14 @@
 # Home Flix
 
-A local Netflix-style launcher for your home videos. Browse a poster grid in your browser; videos play in **VLC** (not the browser). Watch status is stored in `history.json`. Works fully offline.
+A local Netflix-style launcher for your home videos. Browse a poster grid in your browser; videos play in **VLC** or, if you choose, right in the browser. Watch status is stored in `history.json`. Works fully offline.
 
 ## Features
 
 - Grid grouped by folder, with search, watched filter and parent/child folder dropdowns
 - Thumbnails generated with ffmpeg and cached in `thumbs/`
-- Watched marker with date and play count
+- Watched marker with date; rewatched videos show a count ("2 watched")
+- Dropdown choices (folder, subfolder, filter, play mode) are remembered in `prefs.json`
+- "Play in browser" mode: MKV/MPG/AVI etc. are converted on the fly by ffmpeg; progress is saved so you can continue where you left off. A video counts as watched once 90% of it has actually been played (`WATCH_PERCENT` in `.env`)
 - Windows installer (bundles its own Python and ffmpeg, no setup needed)
 
 ## Structure
@@ -43,7 +45,7 @@ Output: `dist/HomeFlix-Setup.exe`.
 
 ## Moving to another PC
 
-Install with the installer, or copy the folder. Copy `history.json` to keep watch history; its keys are paths relative to the videos folder, so they stay valid if the layout inside is unchanged. If VLC isn't auto-detected, set `VLC_PATH` in `.env`.
+Install with the installer, or copy the folder. Copy `history.json` (and `prefs.json`) to keep watch history; its keys are paths relative to the videos folder, so they stay valid if the layout inside is unchanged. If VLC isn't auto-detected, set `VLC_PATH` in `.env`.
 
 ## Notes
 
