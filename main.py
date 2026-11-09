@@ -467,7 +467,8 @@ def shutdown(request: Request):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # no-store so the browser never shows a stale copy of the page after an update
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

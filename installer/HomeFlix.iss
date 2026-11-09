@@ -1,6 +1,6 @@
 ; Inno Setup script. Build with installer\build_installer.ps1
 #define AppName "Home Flix"
-#define AppVersion "1.2"
+#define AppVersion "1.3"
 
 [Setup]
 AppId={{6B1F5C2E-8A47-4D0B-9E53-2C7A1D4F90A1}
@@ -121,10 +121,5 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if CurPageID = wpFinished then
-    if not (FileExists(ExpandConstant('{commonpf}\VideoLAN\VLC\vlc.exe')) or
-            FileExists(ExpandConstant('{commonpf32}\VideoLAN\VLC\vlc.exe'))) then
-      MsgBox('VLC media player was not found on this PC. Home Flix plays videos in VLC, ' +
-             'so install it from videolan.org (or set VLC_PATH in the settings file).',
-             mbInformation, MB_OK);
+  // Videos play in the browser; VLC is no longer needed.
 end;
