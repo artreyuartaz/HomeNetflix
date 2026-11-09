@@ -21,6 +21,14 @@ from starlette.concurrency import run_in_threadpool
 
 import config
 
+if sys.platform == "win32":
+    # Never show Windows "There is no disk in the drive" popups (inherited by ffmpeg child processes).
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)  # FAILCRITICALERRORS|NOGPFAULT|NOOPENFILEERRORBOX
+    except Exception:
+        pass
+
 app = FastAPI(title="Home Netflix")
 STATIC_DIR = config.RESOURCE_DIR / "static"
 _lock = threading.Lock()

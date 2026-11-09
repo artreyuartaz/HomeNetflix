@@ -1,6 +1,6 @@
 ; Inno Setup script. Build with installer\build_installer.ps1
 #define AppName "Home Flix"
-#define AppVersion "1.1"
+#define AppVersion "1.2"
 
 [Setup]
 AppId={{6B1F5C2E-8A47-4D0B-9E53-2C7A1D4F90A1}

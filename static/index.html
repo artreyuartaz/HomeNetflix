@@ -24,10 +24,6 @@
       <option value="unwatched">Unwatched</option>
       <option value="watched">Watched</option>
     </select>
-    <select id="modeSel" title="Where videos play when you click them" class="bg-zinc-800 rounded px-3 py-2 text-sm">
-      <option value="vlc">Play in VLC</option>
-      <option value="browser">Play in browser</option>
-    </select>
     <button id="refresh" class="ml-auto bg-zinc-800 hover:bg-zinc-700 rounded px-3 py-2 text-sm">Rescan</button>
     <button id="quit" title="Stop the Home Flix server" class="bg-zinc-800 hover:bg-red-700 rounded px-3 py-2 text-sm">Quit</button>
   </header>
@@ -99,12 +95,11 @@
       fillChildren();
       setIf($("#childSel"), prefs.child);
       setIf($("#filter"), prefs.filter);
-      setIf($("#modeSel"), prefs.mode);
     }
 
     function savePrefs() {
       prefs = {parent: $("#parentSel").value, child: $("#childSel").value,
-               filter: $("#filter").value, mode: $("#modeSel").value};
+               filter: $("#filter").value};
       fetch("/api/prefs", {method: "POST", headers: {"Content-Type": "application/json"},
                            body: JSON.stringify(prefs)}).catch(() => {});
     }
@@ -190,22 +185,7 @@
       return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
     };
 
-    async function play(id) {
-      if ($("#modeSel").value === "browser") return openPlayer(id);
-      const v = videos.find(x => x.id === id);
-      // Update UI immediately
-      v.watched = true; v.date_watched = new Date().toISOString(); render();
-      try {
-        const res = await fetch("/api/play", {
-          method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id}),
-        });
-        if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-        toast(`Launching VLC: ${v.title}`);
-      } catch (e) {
-        toast("Error: " + e.message, 6000);
-      }
-      load();
-    }
+    const play = (id) => openPlayer(id);
 
     async function unmark(id) {
       await fetch("/api/watched", {
@@ -224,7 +204,6 @@
     $("#filter").addEventListener("change", () => { render(); savePrefs(); });
     $("#parentSel").addEventListener("change", () => { $("#childSel").value = ""; fillChildren(); render(); savePrefs(); });
     $("#childSel").addEventListener("change", () => { render(); savePrefs(); });
-    $("#modeSel").addEventListener("change", savePrefs);
     $("#refresh").addEventListener("click", load);
     // ---------- in-browser player ----------
     // "direct" videos are served as-is; others are converted by ffmpeg while streaming. A converted
@@ -331,13 +310,9 @@
     }
 
     const togglePlay = () => (vid.paused ? vid.play() : vid.pause());
-    // The player runs in true fullscreen (no browser bar). Leaving fullscreen (Esc or the button) closes it.
+    // Leaving fullscreen just shrinks the player back to the page; the video keeps playing. Close with the X.
     const enterFull = () => { if (!document.fullscreenElement) $("#player").requestFullscreen().catch(() => {}); };
-    const toggleFull = () => document.fullscreenElement ? closePlayer() : enterFull();
-    document.addEventListener("fullscreenchange", () => {
-      if (document.fullscreenElement) P.fs = true;
-      else if (P.open && P.fs) closePlayer();
-    });
+    const toggleFull = () => document.fullscreenElement ? document.exitFullscreen().catch(() => {}) : enterFull();
 
     vid.addEventListener("loadedmetadata", () => {
       if (P.mode === "direct") {
@@ -354,7 +329,7 @@
     vid.addEventListener("timeupdate", updateUi);
     vid.addEventListener("ended", () => { report(false); setTimeout(closePlayer, 800); });  // back to the main page
     vid.addEventListener("error", () => {
-      if (P.open && vid.getAttribute("src")) toast("Could not play this video in the browser. Try VLC.", 7000);
+      if (P.open && vid.getAttribute("src")) toast("Could not play this video in the browser. ", 7000);
     });
     setInterval(() => { if (P.open && !vid.paused) report(true); }, 5000);
     window.addEventListener("pagehide", () => report(false, true));
@@ -380,7 +355,7 @@
     document.addEventListener("keydown", (e) => {
       if (!P.open) return;
       showUi();
-      if (e.key === "Escape") closePlayer();
+      if (e.key === "Escape") { if (!document.fullscreenElement) closePlayer(); }
       else if (e.key === " ") { e.preventDefault(); togglePlay(); }
       else if (e.key === "ArrowLeft") { e.preventDefault(); seekTo(curPos() - 10); }
       else if (e.key === "ArrowRight") { e.preventDefault(); seekTo(curPos() + 10); }
